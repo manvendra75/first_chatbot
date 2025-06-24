@@ -20,7 +20,6 @@ if "messages" not in st.session_state.keys(): # Initialize the chat message hist
 # Initialize GoogleGeAI and ConversationChain
 llm = ChatGoogleGenerativeAI(model="gemini-1.5-flash")
 
-)
 
 conversation = ConversationChain(memory=st.session_state.buffer_memory, llm=llm)
 
