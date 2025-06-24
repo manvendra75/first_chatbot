@@ -28,7 +28,9 @@ if st.session_state.messages[-1]["role"] == "user":
             try:
                 response = llm(st.session_state.messages[-1]["content"])
                 st.write(response)
+                # FIX: Wrap response in a dict
                 st.session_state.messages.append({"role": "assistant", "content": response})
             except Exception as e:
                 st.error(f"An error occurred: {e}")
+
 
