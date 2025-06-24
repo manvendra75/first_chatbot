@@ -24,7 +24,7 @@ llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 conversation = ConversationChain(memory=st.session_state.buffer_memory, llm=llm)
 
 # Create user interface
-st.title("🗣️ Conversational Chatbot")
+st.title("🗣️ Umrah Guide")
 st.subheader("㈻ Your Mutamer for Umrah")
 
 prompt = st.chat_input("Your question")
