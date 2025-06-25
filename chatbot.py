@@ -140,40 +140,76 @@ def search_hotels(query: str) -> str:
         city = "madinah"
     elif "jeddah" in query.lower():
         city = "jeddah"
+    elif any(word in query.lower() for word in ["haram", "makkah", "mecca"]):
+        city = "makkah"
     
-    # Extract dates using regex patterns
+    # Extract dates using various patterns
+    check_in = None
+    check_out = None
+    
+    # Pattern 1: "10-14th july" or "10th-14th july"
+    date_range_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s*[-to]+\s*(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)'
+    range_match = re.search(date_range_pattern, query.lower())
+    
+    if range_match:
+        day_start = int(range_match.group(1))
+        day_end = int(range_match.group(2))
+        month_name = range_match.group(3)
+        
+        # Convert month name to number
+        months = {
+            'january': 1, 'jan': 1, 'february': 2, 'feb': 2, 'march': 3, 'mar': 3,
+            'april': 4, 'apr': 4, 'may': 5, 'june': 6, 'jun': 6, 'july': 7, 'jul': 7,
+            'august': 8, 'aug': 8, 'september': 9, 'sep': 9, 'october': 10, 'oct': 10,
+            'november': 11, 'nov': 11, 'december': 12, 'dec': 12
+        }
+        
+        month = months.get(month_name.lower(), datetime.now().month)
+        year = datetime.now().year
+        
+        # Handle year transition
+        if month < datetime.now().month:
+            year += 1
+            
+        check_in = f"{year}-{month:02d}-{day_start:02d}"
+        check_out = f"{year}-{month:02d}-{day_end:02d}"
+    
+    # Pattern 2: Full dates "2025-07-10 to 2025-07-14"
     date_pattern = r'(\d{4}-\d{2}-\d{2})'
     dates = re.findall(date_pattern, query)
     
-    # If no dates found, try to parse natural language
-    today = datetime.now()
-    check_in = today.strftime("%Y-%m-%d")
-    check_out = (today + timedelta(days=3)).strftime("%Y-%m-%d")
-    
-    if dates:
+    if dates and not check_in:
         check_in = dates[0]
         check_out = dates[1] if len(dates) > 1 else (datetime.strptime(dates[0], "%Y-%m-%d") + timedelta(days=3)).strftime("%Y-%m-%d")
-    else:
-        # Parse natural language dates
+    
+    # Default dates if none found
+    if not check_in:
+        today = datetime.now()
         if "tomorrow" in query.lower():
             check_in = (today + timedelta(days=1)).strftime("%Y-%m-%d")
             check_out = (today + timedelta(days=4)).strftime("%Y-%m-%d")
         elif "next week" in query.lower():
             check_in = (today + timedelta(days=7)).strftime("%Y-%m-%d")
             check_out = (today + timedelta(days=10)).strftime("%Y-%m-%d")
-        elif "next month" in query.lower():
-            check_in = (today + timedelta(days=30)).strftime("%Y-%m-%d")
-            check_out = (today + timedelta(days=33)).strftime("%Y-%m-%d")
+        else:
+            check_in = today.strftime("%Y-%m-%d")
+            check_out = (today + timedelta(days=3)).strftime("%Y-%m-%d")
     
     # Extract number of guests
-    adults = 2  # Default
+    adults = 2  # Default for "2 people"
     children = 0
     
-    # Look for guest numbers
-    guest_pattern = r'(\d+)\s*(?:adults?|persons?|peoples?|guests?)'
-    guest_match = re.search(guest_pattern, query.lower())
-    if guest_match:
-        adults = int(guest_match.group(1))
+    # Look for "X people" or "X person"
+    people_pattern = r'(\d+)\s*(?:people|person|pax)'
+    people_match = re.search(people_pattern, query.lower())
+    if people_match:
+        adults = int(people_match.group(1))
+    
+    # Look for specific adult/child mentions
+    adult_pattern = r'(\d+)\s*(?:adults?)'
+    adult_match = re.search(adult_pattern, query.lower())
+    if adult_match:
+        adults = int(adult_match.group(1))
     
     child_pattern = r'(\d+)\s*(?:children|kids?|childs?)'
     child_match = re.search(child_pattern, query.lower())
@@ -205,17 +241,17 @@ tools = [
     Tool(
         name="Search Hotels",
         func=search_hotels,
-        description="Search for hotel availability in Makkah or Madinah on UmrahMe.com"
+        description="Use this tool to search for hotel availability when user asks about hotels, accommodation, stays, or places to sleep in Makkah, Madinah or Jeddah. This tool connects to UmrahMe.com and returns real availability with prices."
     ),
     Tool(
         name="Search Packages",
         func=search_packages,
-        description="Search for Umrah packages (economy, premium, VIP) on UmrahMe.com"
+        description="Use this tool when user asks about Umrah packages, package deals, or complete Umrah tours. Returns current packages from UmrahMe.com"
     ),
     Tool(
         name="Search Trains",
         func=search_trains,
-        description="Search for Haramain train schedules between Makkah, Madinah, and Jeddah"
+        description="Use this tool when user asks about trains, Haramain express, or transportation between cities. Returns train schedules from UmrahMe.com"
     )
 ]
 
@@ -254,7 +290,26 @@ if "agent" not in st.session_state:
         memory=st.session_state.memory,
         verbose=True,  # Set to False in production
         handle_parsing_errors=True,
-        max_iterations=3
+        max_iterations=3,
+        agent_kwargs={
+            "prefix": """You are an Umrah guide assistant with access to UmrahMe.com for real-time information. 
+
+IMPORTANT: When users ask about hotels, accommodation, or places to stay, you MUST use the 'Search Hotels' tool to check availability on UmrahMe.com. Do not ask for more information first - search immediately with the information provided and then ask for clarification if needed.
+
+When users ask about packages or trains, use the appropriate search tools.
+
+You have access to the following tools:""",
+            "format_instructions": """Use the following format:
+
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [{tool_names}]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question""",
+        }
     )
 
 # UI Elements
