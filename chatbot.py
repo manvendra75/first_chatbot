@@ -334,6 +334,10 @@ if prompt:
     with st.chat_message("assistant"):
         with st.spinner("Searching and thinking..."):
             try:
+                # Debug: Show what's being processed
+                if st.secrets.get("DEBUG_MODE", False):
+                    st.caption(f"Processing: {prompt}")
+                
                 # Use the agent to process the query
                 response = st.session_state.agent.run(prompt)
                 
@@ -347,13 +351,19 @@ if prompt:
                 error_msg = f"An error occurred: {str(e)}"
                 st.error(error_msg)
                 
-                # Fallback to basic conversation without tools
-                try:
-                    fallback_response = llm.invoke(prompt).content
-                    st.write(fallback_response)
-                    st.session_state.messages.append({"role": "assistant", "content": fallback_response})
-                except:
-                    st.error("❌ Please try again or rephrase your question.")
+                # More detailed error info
+                import traceback
+                st.error(f"Full error: {traceback.format_exc()}")
+                
+                # Fallback: Try direct tool call for hotels
+                if any(word in prompt.lower() for word in ["hotel", "accommodation", "stay", "haram"]):
+                    st.info("Trying direct search...")
+                    try:
+                        result = search_hotels(prompt)
+                        st.write(result)
+                        st.session_state.messages.append({"role": "assistant", "content": result})
+                    except Exception as tool_error:
+                        st.error(f"Tool error: {str(tool_error)}")
 
 # Sidebar with additional information
 with st.sidebar:
@@ -397,6 +407,17 @@ with st.sidebar:
         st.rerun()
     
     st.divider()
+    
+    # Test integration button
+    if st.button("🧪 Test UmrahMe Integration"):
+        with st.spinner("Testing hotel search..."):
+            try:
+                test_query = "hotels in makkah from 10-14th july for 2 people"
+                test_result = search_hotels(test_query)
+                st.success("✅ Integration working!")
+                st.write(test_result)
+            except Exception as e:
+                st.error(f"❌ Integration error: {str(e)}")
     
     # Option to clear chat history
     if st.button("🗑️ Clear Chat History"):
