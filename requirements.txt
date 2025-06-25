@@ -2,3 +2,5 @@ langchain
 langchain-google-genai
 streamlit
 streamlit-chat
+requests
+beautifulsoup4
