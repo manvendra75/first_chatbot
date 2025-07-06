@@ -1,5 +1,5 @@
 import streamlit as st
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_openai import ChatOpenAI
 from langchain.memory import ConversationBufferMemory
 from langchain.prompts import PromptTemplate
 import requests
@@ -7,33 +7,38 @@ from bs4 import BeautifulSoup
 import os
 from datetime import datetime, timedelta
 import re
+from rag_system import UmrahRAGSystem, initialize_rag_system
+import json
 
 # Set the API key from secrets
-os.environ["GOOGLE_API_KEY"] = st.secrets["GEMINI_API_KEY"]
+os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
 
 # Initialize the LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-1.5-flash",
-    google_api_key=st.secrets["GEMINI_API_KEY"],
+llm = ChatOpenAI(
+    model="gpt-3.5-turbo",
+    openai_api_key=st.secrets["OPENAI_API_KEY"],
     temperature=0.7
 )
 
-# UmrahMe Integration Class
+# Initialize RAG system
+@st.cache_resource
+def get_rag_system():
+    return initialize_rag_system(st.secrets["OPENAI_API_KEY"])
+
+# UmrahMe Integration Class (existing code)
 class UmrahMeChecker:
     def __init__(self):
         self.base_url = "https://www.umrahme.com"
-        # Destination IDs - Update these with the actual IDs you have
         self.destination_ids = {
             "makkah": {"id": "235565", "name": "Makkah, Saudi Arabia"},
-            "madinah": {"id": "235566", "name": "Madinah, Saudi Arabia"},  # Update with correct ID
-            "medina": {"id": "235566", "name": "Madinah, Saudi Arabia"},   # Alias
-            "jeddah": {"id": "235567", "name": "Jeddah, Saudi Arabia"}     # Update with correct ID
+            "madinah": {"id": "235566", "name": "Madinah, Saudi Arabia"},
+            "medina": {"id": "235566", "name": "Madinah, Saudi Arabia"},
+            "jeddah": {"id": "235567", "name": "Jeddah, Saudi Arabia"}
         }
     
     def parse_query(self, query: str):
         """Parse natural language query to extract city, dates, and guests"""
-        # Extract city
-        city = "makkah"  # Default
+        city = "makkah"
         if any(word in query.lower() for word in ["madinah", "medina", "madina"]):
             city = "madinah"
         elif "jeddah" in query.lower():
@@ -41,11 +46,9 @@ class UmrahMeChecker:
         elif any(word in query.lower() for word in ["haram", "makkah", "mecca"]):
             city = "makkah"
         
-        # Extract dates
         check_in = None
         check_out = None
         
-        # Pattern: "10-14th july" or "10th-14th july"
         date_range_pattern = r'(\d{1,2})(?:st|nd|rd|th)?\s*[-to]+\s*(\d{1,2})(?:st|nd|rd|th)?\s+(\w+)'
         range_match = re.search(date_range_pattern, query.lower())
         
@@ -70,14 +73,12 @@ class UmrahMeChecker:
             check_in = f"{year}-{month:02d}-{day_start:02d}"
             check_out = f"{year}-{month:02d}-{day_end:02d}"
         
-        # Default dates if none found
         if not check_in:
             today = datetime.now()
             check_in = today.strftime("%Y-%m-%d")
             check_out = (today + timedelta(days=3)).strftime("%Y-%m-%d")
         
-        # Extract guests
-        adults = 2  # Default
+        adults = 2
         children = 0
         
         people_pattern = r'(\d+)\s*(?:people|person|pax)'
@@ -115,61 +116,112 @@ class UmrahMeChecker:
 # Initialize checker
 umrahme_checker = UmrahMeChecker()
 
-# Initialize session state
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-    initial_message = """Assalamu Alaikum! I'm your Umrah guide with direct access to UmrahMe.com. 
-
-I can help you with:
-🏨 **Hotel Search** - Find hotels in Makkah, Madinah, or Jeddah
-📦 **Umrah Packages** - Browse available packages
-🚄 **Train Schedules** - Haramain express information
-📿 **Umrah Guidance** - Rituals, duas, and tips
-
-Just tell me what you need! For example:
-- "Find hotels near Haram from 10-14th July for 2 people"
-- "Show me Umrah packages"
-- "What are the steps of Umrah?"
-"""
-    st.session_state.messages.append({"role": "assistant", "content": initial_message})
-
-# UI
-st.title("🕋 Umrah Guide + UmrahMe.com")
-st.subheader("Your AI Assistant with Live Availability")
-
-# Display chat history
-for msg in st.session_state.messages:
-    with st.chat_message(msg["role"]):
-        st.write(msg["content"])
-
-# Chat input
-prompt = st.chat_input("Ask about hotels, packages, or Umrah guidance...")
-
-if prompt:
-    # Add user message
-    st.session_state.messages.append({"role": "user", "content": prompt})
-    with st.chat_message("user"):
-        st.write(prompt)
+# Enhanced Query Processor with RAG
+class EnhancedQueryProcessor:
+    def __init__(self, rag_system):
+        self.rag = rag_system
+        self.umrahme = umrahme_checker
     
-    # Process the query
-    with st.chat_message("assistant"):
-        with st.spinner("Searching..."):
-            # Check if this is a hotel query
-            if any(word in prompt.lower() for word in ["hotel", "hotels", "accommodation", "stay", "room", "haram"]):
-                # Parse the query
-                city, check_in, check_out, adults, children = umrahme_checker.parse_query(prompt)
-                
-                # Generate URL
-                url, destination_name = umrahme_checker.get_hotel_url(city, check_in, check_out, adults, children)
-                
-                if url:
-                    response = f"""🏨 **Searching hotels in {destination_name}**
+    def process_query(self, query: str):
+        """Process query and determine the best response approach"""
+        query_lower = query.lower()
+        
+        # Check query type
+        if any(word in query_lower for word in ["ritual", "tawaf", "sai", "ihram", "miqat", "step", "perform", "how to"]):
+            return self.handle_ritual_query(query)
+        
+        elif any(word in query_lower for word in ["attraction", "visit", "see", "shopping", "restaurant", "cafe", "places"]):
+            return self.handle_attraction_query(query)
+        
+        elif any(word in query_lower for word in ["hotel", "accommodation", "stay", "room", "kaaba view", "haram view"]):
+            return self.handle_hotel_query(query)
+        
+        elif any(word in query_lower for word in ["review", "experience", "stayed", "visited", "recommend"]):
+            return self.handle_review_query(query)
+        
+        elif any(word in query_lower for word in ["package", "deal", "offer"]):
+            return self.handle_package_query(query)
+        
+        elif any(word in query_lower for word in ["train", "haramain", "railway"]):
+            return self.handle_train_query(query)
+        
+        else:
+            # Use RAG for general queries
+            return self.handle_general_query(query)
+    
+    def handle_ritual_query(self, query: str):
+        """Handle ritual-related queries using RAG"""
+        result = self.rag.query(query, filter_dict={"type": "ritual_guide"})
+        
+        response = f"📿 **Umrah Ritual Guidance**\n\n{result['answer']}\n\n"
+        
+        if result.get('sources'):
+            response += "📚 **Sources:**\n"
+            for source in result['sources'][:3]:
+                response += f"- {source['metadata'].get('section', 'Unknown')} from Nusuk.sa\n"
+        
+        return response
+    
+    def handle_attraction_query(self, query: str):
+        """Handle attraction queries using RAG"""
+        city = "makkah" if "makkah" in query.lower() or "mecca" in query.lower() else "madinah"
+        
+        category = None
+        if "shopping" in query.lower():
+            category = "shopping"
+        elif "restaurant" in query.lower() or "food" in query.lower():
+            category = "restaurants"
+        
+        result = self.rag.query_attractions(city, category)
+        
+        response = f"🏛️ **{city.title()} Attractions & Services**\n\n{result['answer']}\n\n"
+        
+        if result.get('sources'):
+            response += "📍 **Information from:**\n"
+            for source in result['sources'][:3]:
+                response += f"- {source['metadata'].get('section', 'General').replace('_', ' ').title()}\n"
+        
+        return response
+    
+    def handle_hotel_query(self, query: str):
+        """Handle hotel queries with both RAG and UmrahMe integration"""
+        # First, check if user wants specific criteria hotels from our database
+        if any(word in query.lower() for word in ["kaaba view", "haram view", "walking distance", "shuttle"]):
+            city = "makkah" if "makkah" in query.lower() or not "madinah" in query.lower() else "madinah"
+            
+            filters = {
+                "city": city,
+                "has_kaaba_view": "kaaba view" in query.lower(),
+                "walking_distance": "walking distance" in query.lower()
+            }
+            
+            # Remove False values from filters
+            filters = {k: v for k, v in filters.items() if v}
+            
+            result = self.rag.query_hotels(**filters)
+            
+            response = f"🏨 **Hotels in {city.title()} - From Our Database**\n\n"
+            response += result['answer'] + "\n\n"
+            
+            # Also provide UmrahMe link
+            city_param, check_in, check_out, adults, children = self.umrahme.parse_query(query)
+            url, destination_name = self.umrahme.get_hotel_url(city_param, check_in, check_out, adults, children)
+            
+            if url:
+                response += f"🔗 **[View live availability on UmrahMe.com]({url})**\n\n"
+                response += "💡 **Note:** The hotels above are from our database. Check UmrahMe for real-time availability and current prices."
+        
+        else:
+            # For general hotel queries, use UmrahMe
+            city, check_in, check_out, adults, children = self.umrahme.parse_query(query)
+            url, destination_name = self.umrahme.get_hotel_url(city, check_in, check_out, adults, children)
+            
+            if url:
+                response = f"""🏨 **Searching hotels in {destination_name}**
 
 📅 Check-in: {check_in}
 📅 Check-out: {check_out}
 👥 Guests: {adults} adults{f', {children} children' if children > 0 else ''}
-
-I'm generating a direct link to UmrahMe.com with your search criteria...
 
 🔗 **[Click here to view available hotels]({url})**
 
@@ -180,25 +232,40 @@ This link will show you:
 - Distance from Haram
 - Guest ratings and reviews
 
-💡 **Tips for booking:**
-- Hotels closer to Haram are usually more expensive
-- Book early for better rates
-- Check cancellation policies
-- Look for hotels with shuttle services
+💡 **Special Hotel Categories Available:**
+- 🕋 Kaaba view rooms
+- 🕌 Haram view rooms
+- 🚶 Haram in walking distance
+- 🚌 Free shuttle to Haram
+- 🤲 Haram-connected prayer hall
 
-Would you like me to search for different dates or help with anything else?"""
-                else:
-                    response = "I couldn't generate a hotel search link. Please specify a valid city (Makkah, Madinah, or Jeddah)."
-                
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            
-            # Check if this is a package query
-            elif any(word in prompt.lower() for word in ["package", "packages", "deal", "offer"]):
-                response = f"""📦 **Umrah Packages on UmrahMe.com**
+Would you like me to search for hotels with specific features?"""
+            else:
+                response = "I couldn't generate a hotel search link. Please specify a valid city (Makkah, Madinah, or Jeddah)."
+        
+        return response
+    
+    def handle_review_query(self, query: str):
+        """Handle review queries using Reddit data from RAG"""
+        result = self.rag.query(query, filter_dict={"type": "user_review"})
+        
+        response = f"💬 **User Reviews & Experiences**\n\n{result['answer']}\n\n"
+        
+        if result.get('sources'):
+            response += "🔍 **From Reddit discussions:**\n"
+            for source in result['sources'][:3]:
+                response += f"- r/{source['metadata'].get('subreddit', 'unknown')} (Score: {source['metadata'].get('score', 0)})\n"
+        
+        response += "\n💡 **Note:** These are user experiences from Reddit. Individual experiences may vary."
+        
+        return response
+    
+    def handle_package_query(self, query: str):
+        """Handle package queries"""
+        response = f"""📦 **Umrah Packages on UmrahMe.com**
 
 Browse available packages:
-🔗 **[View all Umrah packages]({umrahme_checker.base_url}/packages)**
+🔗 **[View all Umrah packages]({self.umrahme.base_url}/packages)**
 
 Package types available:
 - ⭐ Economy packages
@@ -211,19 +278,19 @@ Each package typically includes:
 - 🚌 Transportation
 - 📋 Visa assistance
 
-Would you like specific package recommendations?"""
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            
-            # Check if this is a train query
-            elif any(word in prompt.lower() for word in ["train", "haramain", "railway"]):
-                response = f"""🚄 **Haramain Express Information**
+Would you like specific package recommendations based on your budget or preferences?"""
+        
+        return response
+    
+    def handle_train_query(self, query: str):
+        """Handle train queries"""
+        response = f"""🚄 **Haramain Express Information**
 
 The Haramain Express connects:
 - Makkah ↔️ Madinah (2.5 hours)
 - Via Jeddah and King Abdullah Economic City
 
-🔗 **[Check train schedules]({umrahme_checker.base_url}/trains)**
+🔗 **[Check train schedules]({self.umrahme.base_url}/trains)**
 
 Train features:
 - 🪑 Economy and Business class
@@ -232,50 +299,124 @@ Train features:
 - 🏃 Faster than road travel
 
 Need help booking train tickets?"""
-                st.markdown(response)
-                st.session_state.messages.append({"role": "assistant", "content": response})
-            
-            # For other queries, use the LLM
-            else:
-                try:
-                    response = llm.invoke(prompt).content
-                    st.write(response)
-                    st.session_state.messages.append({"role": "assistant", "content": response})
-                except Exception as e:
-                    st.error(f"Error: {str(e)}")
-
-# Sidebar
-with st.sidebar:
-    st.header("🌐 UmrahMe Integration")
-    
-    # Quick search section
-    st.subheader("🔍 Quick Search")
-    
-    with st.form("quick_hotel_search"):
-        col1, col2 = st.columns(2)
-        with col1:
-            city = st.selectbox("City", ["Makkah", "Madinah", "Jeddah"])
-            check_in = st.date_input("Check-in", datetime.now())
-        with col2:
-            nights = st.number_input("Nights", min_value=1, value=3)
-            guests = st.number_input("Guests", min_value=1, value=2)
         
-        if st.form_submit_button("Search Hotels"):
-            check_out = check_in + timedelta(days=nights)
-            query = f"hotels in {city} from {check_in} to {check_out} for {guests} people"
-            st.session_state.messages.append({"role": "user", "content": query})
+        return response
+    
+    def handle_general_query(self, query: str):
+        """Handle general queries using RAG"""
+        result = self.rag.query(query)
+        
+        response = result['answer']
+        
+        if result.get('sources'):
+            response += "\n\n📚 **Sources:** Information compiled from Nusuk.sa and user experiences."
+        
+        return response
+
+# Initialize session state
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+    initial_message = """Assalamu Alaikum! I'm your enhanced Umrah guide with access to:
+
+🕋 **Comprehensive Umrah Information**
+- Detailed ritual guides from Nusuk.sa
+- Step-by-step instructions for all Umrah rites
+- Makkah & Madinah attractions and services
+
+🏨 **Hotel Database & Live Search**
+- Curated hotels with special features (Kaaba view, walking distance, etc.)
+- Direct integration with UmrahMe.com for live availability
+- User reviews from Reddit communities
+
+📦 **Complete Travel Planning**
+- Umrah packages
+- Haramain Express train information
+- Shopping and dining recommendations
+
+Just ask me anything! For example:
+- "Explain the steps of Tawaf"
+- "Show me hotels with Kaaba view"
+- "What are the best restaurants in Madinah?"
+- "Find hotels from 10-14th July for 4 people"
+"""
+    st.session_state.messages.append({"role": "assistant", "content": initial_message})
+
+# Initialize RAG system status
+if "rag_status" not in st.session_state:
+    st.session_state.rag_status = "initializing"
+
+# UI
+st.title("🕋 Enhanced Umrah Guide with RAG")
+st.subheader("AI Assistant with Knowledge Base + Live Availability")
+
+# Show RAG system status in sidebar
+with st.sidebar:
+    st.header("🤖 System Status")
+    
+    if st.session_state.rag_status == "initializing":
+        with st.spinner("Loading knowledge base..."):
+            rag_system = get_rag_system()
+            if rag_system:
+                st.session_state.rag_status = "ready"
+                st.session_state.query_processor = EnhancedQueryProcessor(rag_system)
+            else:
+                st.session_state.rag_status = "error"
+    
+    if st.session_state.rag_status == "ready":
+        st.success("✅ Knowledge base loaded")
+        st.info("📚 Sources available:\n- Nusuk.sa rituals\n- Destination guides\n- Hotel database\n- Reddit reviews")
+    elif st.session_state.rag_status == "error":
+        st.error("❌ Failed to load knowledge base")
+        if st.button("🔄 Retry"):
+            st.session_state.rag_status = "initializing"
             st.rerun()
     
     st.divider()
     
-    # Test button
-    if st.button("🧪 Test Integration"):
-        test_city, test_in, test_out, test_adults, _ = umrahme_checker.parse_query(
-            "hotels near haram from 10-14th july for 2 people"
+    # Quick search section
+    st.subheader("🔍 Quick Actions")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("📿 Umrah Steps"):
+            st.session_state.messages.append({"role": "user", "content": "What are the complete steps of Umrah?"})
+            st.rerun()
+        
+        if st.button("🕋 Kaaba View Hotels"):
+            st.session_state.messages.append({"role": "user", "content": "Show me hotels with Kaaba view in Makkah"})
+            st.rerun()
+    
+    with col2:
+        if st.button("🏛️ Makkah Attractions"):
+            st.session_state.messages.append({"role": "user", "content": "What attractions should I visit in Makkah?"})
+            st.rerun()
+        
+        if st.button("🍽️ Madinah Food"):
+            st.session_state.messages.append({"role": "user", "content": "Best restaurants in Madinah?"})
+            st.rerun()
+    
+    st.divider()
+    
+    # Hotel search form
+    with st.form("quick_hotel_search"):
+        st.subheader("🏨 Hotel Search")
+        city = st.selectbox("City", ["Makkah", "Madinah", "Jeddah"])
+        check_in = st.date_input("Check-in", datetime.now())
+        nights = st.number_input("Nights", min_value=1, value=3)
+        guests = st.number_input("Guests", min_value=1, value=2)
+        
+        special_features = st.multiselect(
+            "Special Features",
+            ["Kaaba view", "Haram view", "Walking distance", "Free shuttle"]
         )
-        test_url, _ = umrahme_checker.get_hotel_url(test_city, test_in, test_out, test_adults)
-        st.success("✅ Integration working!")
-        st.code(test_url, language="text")
+        
+        if st.form_submit_button("Search Hotels"):
+            check_out = check_in + timedelta(days=nights)
+            query = f"hotels in {city} from {check_in} to {check_out} for {guests} people"
+            if special_features:
+                query += f" with {' and '.join(special_features)}"
+            st.session_state.messages.append({"role": "user", "content": query})
+            st.rerun()
     
     # Clear chat
     if st.button("🗑️ Clear Chat"):
@@ -284,4 +425,41 @@ with st.sidebar:
     
     st.divider()
     st.caption("🟢 Connected to UmrahMe.com")
+    st.caption(f"📚 Knowledge base: {'Ready' if st.session_state.rag_status == 'ready' else 'Loading...'}")
     st.caption(f"💬 {len(st.session_state.messages)} messages")
+
+# Display chat history
+for msg in st.session_state.messages:
+    with st.chat_message(msg["role"]):
+        st.write(msg["content"])
+
+# Chat input
+prompt = st.chat_input("Ask about rituals, hotels, attractions, or anything Umrah-related...")
+
+if prompt and st.session_state.rag_status == "ready":
+    # Add user message
+    st.session_state.messages.append({"role": "user", "content": prompt})
+    with st.chat_message("user"):
+        st.write(prompt)
+    
+    # Process the query
+    with st.chat_message("assistant"):
+        with st.spinner("Searching knowledge base..."):
+            try:
+                response = st.session_state.query_processor.process_query(prompt)
+                st.markdown(response)
+                st.session_state.messages.append({"role": "assistant", "content": response})
+            except Exception as e:
+                st.error(f"Error: {str(e)}")
+                fallback_response = "I encountered an error. Let me try a simpler approach..."
+                
+                # Fallback to basic LLM
+                try:
+                    llm_response = llm.invoke(prompt).content
+                    st.write(llm_response)
+                    st.session_state.messages.append({"role": "assistant", "content": llm_response})
+                except Exception as e2:
+                    st.error(f"Fallback error: {str(e2)}")
+
+elif prompt and st.session_state.rag_status != "ready":
+    st.warning("⏳ Please wait for the knowledge base to load before asking questions.")
