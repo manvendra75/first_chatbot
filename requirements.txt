@@ -1,6 +1,11 @@
 langchain
-langchain-google-genai
+langchain-openai
+langchain-community
 streamlit
 streamlit-chat
 requests
 beautifulsoup4
+faiss-cpu
+numpy
+tiktoken
+openai
